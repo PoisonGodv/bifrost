@@ -142931,6 +142931,12 @@
                 "type": "integer",
                 "description": "Number of days to retain logs"
               },
+              "vector_retention_days": {
+                "type": "integer",
+                "minimum": 0,
+                "default": 0,
+                "description": "Days to keep vector store entries tied to logs (Warp's log index and the complexity router's captured requests). 0 keeps them as long as the logs; a value above log_retention_days is capped at it. Omitted on PUT keeps the stored value."
+              },
               "delete_expired_virtual_keys": {
                 "type": "boolean",
                 "default": false,
@@ -143778,6 +143784,12 @@
               "log_retention_days": {
                 "type": "integer",
                 "description": "Number of days to retain logs"
+              },
+              "vector_retention_days": {
+                "type": "integer",
+                "minimum": 0,
+                "default": 0,
+                "description": "Days to keep vector store entries tied to logs (Warp's log index and the complexity router's captured requests). 0 keeps them as long as the logs; a value above log_retention_days is capped at it. Omitted on PUT keeps the stored value."
               },
               "delete_expired_virtual_keys": {
                 "type": "boolean",
@@ -148293,7 +148305,7 @@
         "properties": {
           "base_url": {
             "type": "string",
-            "description": "Base URL for the provider (optional)"
+            "description": "Base URL for the provider (optional). For Bedrock, only the host is used, as the bedrock-runtime host for all inference; a key's bedrock_key_config.endpoints.runtime takes precedence."
           },
           "extra_headers": {
             "type": "object",
