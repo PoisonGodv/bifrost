@@ -212,6 +212,23 @@ func (f *fakeStore) ListClaimableSidekiqJobs(_ context.Context, staleBefore time
 	return out, nil
 }
 
+// DeleteTerminalSidekiqJobs deletes up to limit finished jobs of kind updated before the cutoff.
+func (f *fakeStore) DeleteTerminalSidekiqJobs(_ context.Context, kind string, before time.Time, limit int) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var n int64
+	for id, j := range f.jobs {
+		if n >= int64(limit) {
+			break
+		}
+		if j.kind == kind && tables.IsSidekiqTerminalStatus(j.status) && j.updatedAt.Before(before) {
+			delete(f.jobs, id)
+			n++
+		}
+	}
+	return n, nil
+}
+
 // waitTerminal blocks until a job reaches a terminal state or the test times out.
 func waitTerminal(t *testing.T, f *fakeStore) string {
 	t.Helper()
@@ -828,4 +845,50 @@ func TestSummarizerRegistry(t *testing.T) {
 	got, ok = r.Summarize("no-summarizer", "{}")
 	assert.False(t, ok, "kinds without a summarizer report no progress")
 	assert.Equal(t, JobSummary{}, got)
+}
+
+// TestSweepRetention pins that only finished jobs of a kind with a retention,
+// older than it, are deleted; pending and running jobs, recent finished jobs
+// and kinds without a retention are kept; a backlog over one batch is fully
+// removed; and the dispatcher sweeps at most once per interval.
+func TestSweepRetention(t *testing.T) {
+	store := newFakeStore()
+	now := time.Now()
+	old := now.Add(-48 * time.Hour)
+	add := func(id, kind, status string, at time.Time) {
+		store.jobs[id] = &jobState{kind: kind, status: status, updatedAt: at}
+	}
+	for i := 0; i < retentionDeleteBatch+5; i++ {
+		add(fmt.Sprintf("old-%d", i), "timer", tables.SidekiqStatusCompleted, old)
+	}
+	add("old-failed", "timer", tables.SidekiqStatusFailed, old)
+	add("old-cancelled", "timer", tables.SidekiqStatusCancelled, old)
+	add("old-pending", "timer", tables.SidekiqStatusPending, old)
+	add("old-running", "timer", tables.SidekiqStatusRunning, old)
+	add("recent", "timer", tables.SidekiqStatusCompleted, now.Add(-time.Hour))
+	add("other-kind", "manual", tables.SidekiqStatusCompleted, old)
+
+	r := New(store, bifrost.NewDefaultLogger(schemas.LogLevelError), 1, "")
+	r.RegisterRetention("timer", 24*time.Hour)
+	r.SweepRetention(context.Background(), now)
+
+	var left []string
+	for id := range store.jobs {
+		left = append(left, id)
+	}
+	assert.ElementsMatch(t, []string{"old-pending", "old-running", "other-kind", "recent"}, left)
+
+	add("again-1", "timer", tables.SidekiqStatusCompleted, old)
+	r.sweepRetentionIfDue(now)
+	assert.NotContains(t, store.jobs, "again-1", "the first scheduled sweep runs at once")
+	add("again-2", "timer", tables.SidekiqStatusCompleted, old)
+	r.sweepRetentionIfDue(now.Add(5 * time.Minute))
+	assert.Contains(t, store.jobs, "again-2", "a dispatcher tick within the interval does not sweep again")
+	r.sweepRetentionIfDue(now.Add(RetentionSweepInterval))
+	assert.NotContains(t, store.jobs, "again-2", "the next interval sweeps again")
+
+	r.RegisterRetention("timer", 0)
+	add("again-3", "timer", tables.SidekiqStatusCompleted, old)
+	r.SweepRetention(context.Background(), now)
+	assert.Contains(t, store.jobs, "again-3", "a removed retention keeps jobs forever")
 }
